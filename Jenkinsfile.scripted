@@ -1,0 +1,68 @@
+node {
+    def appName     = 'SimpleCustomerApp'
+    def mvnHome     = tool 'MVN_HOME'
+    def scannerHome = tool 'sonar_scanner'
+    def nexusUrl    = 'nexus:8081'
+    def nexusRepo   = 'maven-snapshots'
+    def tomcatUrl   = 'http://tomcat:8080'
+
+    try {
+        stage('Git Clone') {
+            git branch: 'feature-1.1',
+                url: 'https://github.com/betawins/sabear_simplecutomerapp.git'
+        }
+
+        stage('SonarQube Integration') {
+            withSonarQubeEnv('sonarqube_server') {
+                sh "${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=${appName} " +
+                   "-Dsonar.projectName=${appName} -Dsonar.projectVersion=${env.BUILD_NUMBER} " +
+                   "-Dsonar.sources=src -Dsonar.java.binaries=. -Dsonar.sourceEncoding=UTF-8"
+            }
+        }
+
+        stage('Maven Compilation') {
+            withEnv(["PATH+MAVEN=${mvnHome}/bin"]) {
+                sh "mvn -B -Dmaven.test.failure.ignore=true " +
+                   "-DBUILD_NUMBER=${env.BUILD_NUMBER} clean package"
+            }
+        }
+
+        stage('Nexus Artifactory') {
+            def pom = readMavenPom file: 'pom.xml'
+            def war = findFiles(glob: 'target/*.war')[0].path
+            nexusArtifactUploader(
+                nexusVersion: 'nexus3',
+                protocol: 'http',
+                nexusUrl: nexusUrl,
+                groupId: pom.groupId,
+                version: "${env.BUILD_NUMBER}-SNAPSHOT",
+                repository: nexusRepo,
+                credentialsId: 'nexus_credentials',
+                artifacts: [[artifactId: pom.artifactId, classifier: '',
+                             file: war, type: 'war']]
+            )
+        }
+
+        stage('Slack Notification') {
+            slackSend channel: '#jenkins-builds', color: 'good',
+                message: "${env.JOB_NAME} #${env.BUILD_NUMBER}: WAR in Nexus, deploying"
+        }
+
+        stage('Deploy on Tomcat') {
+            deploy adapters: [tomcat9(credentialsId: 'tomcat_credentials',
+                                      path: '', url: tomcatUrl)],
+                   contextPath: appName,
+                   war: 'target/*.war'
+        }
+
+        slackSend channel: '#jenkins-builds', color: 'good',
+            message: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+
+    } catch (Exception e) {
+        currentBuild.result = 'FAILURE'
+        slackSend channel: '#jenkins-builds', color: 'danger',
+            message: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER} ${env.BUILD_URL}"
+        throw e
+    }
+}
+
