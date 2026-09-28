@@ -1,0 +1,95 @@
+pipeline {
+    agent any
+
+    tools {
+        maven 'MVN_HOME'                 // name from Global Tool Configuration
+    }
+
+    environment {
+        APP_NAME            = 'SimpleCustomerApp'
+        SCANNER_HOME        = tool 'sonar_scanner'
+        NEXUS_URL           = 'nexus:8081'
+        NEXUS_REPOSITORY    = 'maven-snapshots'
+        NEXUS_CREDENTIAL_ID = 'nexus_credentials'
+        TOMCAT_URL          = 'http://tomcat:8080'
+    }
+
+    stages {
+        stage('Git Clone') {
+            steps {
+                git branch: 'feature-1.1',
+                    url: 'https://github.com/betawins/sabear_simplecutomerapp.git'
+            }
+        }
+
+        stage('SonarQube Integration') {
+            steps {
+                withSonarQubeEnv('sonarqube_server') {
+                    sh '''
+                        $SCANNER_HOME/bin/sonar-scanner \
+                          -Dsonar.projectKey=$APP_NAME \
+                          -Dsonar.projectName=$APP_NAME \
+                          -Dsonar.projectVersion=$BUILD_NUMBER \
+                          -Dsonar.sources=src \
+                          -Dsonar.java.binaries=. \
+                          -Dsonar.sourceEncoding=UTF-8
+                    '''
+                }
+            }
+        }
+
+        stage('Maven Compilation') {
+            steps {
+                sh 'mvn -B -Dmaven.test.failure.ignore=true -DBUILD_NUMBER=$BUILD_NUMBER clean package'
+            }
+        }
+
+        stage('Nexus Artifactory') {
+            steps {
+                script {
+                    def pom = readMavenPom file: 'pom.xml'
+                    def war = findFiles(glob: 'target/*.war')[0].path
+                    nexusArtifactUploader(
+                        nexusVersion: 'nexus3',
+                        protocol: 'http',
+                        nexusUrl: env.NEXUS_URL,
+                        groupId: pom.groupId,
+                        version: "${env.BUILD_NUMBER}-SNAPSHOT",
+                        repository: env.NEXUS_REPOSITORY,
+                        credentialsId: env.NEXUS_CREDENTIAL_ID,
+                        artifacts: [[artifactId: pom.artifactId, classifier: '',
+                                     file: war, type: 'war']]
+                    )
+                }
+            }
+        }
+
+        stage('Slack Notification') {
+            steps {
+                slackSend channel: '#jenkins-builds', color: 'good',
+                    message: "${env.JOB_NAME} #${env.BUILD_NUMBER}: WAR in Nexus, deploying"
+            }
+        }
+
+        stage('Deploy on Tomcat') {
+            steps {
+                deploy adapters: [tomcat9(credentialsId: 'tomcat_credentials',
+                                          path: '', url: env.TOMCAT_URL)],
+                       contextPath: 'SimpleCustomerApp',
+                       war: 'target/*.war'
+            }
+        }
+    }
+
+    post {
+        success {
+            slackSend channel: '#jenkins-builds', color: 'good',
+                message: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+        }
+        failure {
+            slackSend channel: '#jenkins-builds', color: 'danger',
+                message: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER} ${env.BUILD_URL}"
+        }
+    }
+}
+
